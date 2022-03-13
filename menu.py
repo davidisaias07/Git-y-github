@@ -5,7 +5,11 @@ def menu (tipo_plato,precio):
 
 platos_comida = """ Bievenido al menú, te presentamos nuestros platos disponibles:
 
+<<<<<<< HEAD
 1- Arroz con carne
+=======
+1- Arroz con papas
+>>>>>>> v0.1
 2- Fideos al alfredo
 3- Tallarines rojos con carne
 4- Plato oculto
@@ -22,7 +26,11 @@ Elije una opción: """))
 
 
 if platos_comida == 1:
+<<<<<<< HEAD
     menu("arroz con carne", 14)
+=======
+    menu("arroz con papas", 14)
+>>>>>>> v0.1
 
 elif platos_comida == 2:
     menu("fideos al alfredo", 17)

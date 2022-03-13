@@ -1,3 +1,7 @@
 Hola soy David, tengo 24 años
 Me gusta la música
+<<<<<<< HEAD
 Le gusta comer helado
+=======
+Está estudiando git y github
+>>>>>>> v0.1
