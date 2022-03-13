@@ -3,14 +3,6 @@ def menu (tipo_plato,precio):
     print("Elegiste " + tipo_plato+", el precio de: " + str(precio)+ " soles")
 
 
-platos_comida = """ Bievenido al menú, te presentamos nuestros platos disponibles:
-
-1- Arroz con papas
-2- Fideos al alfredo
-3- Tallarines rojos con carne
-4- Plato oculto
-
-"""
 
 platos_comida = int(input("""Bievenido al menú, te presentamos nuestros platos disponibles:
 
