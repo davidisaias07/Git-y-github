@@ -1,0 +1,39 @@
+-- Get the first type of revenue by id_transaction (from call or click revenue)
+DROP TABLE IF EXISTS universe;
+CREATE TEMP TABLE universe AS
+  SELECT
+    c.id_transaction
+    ,w.id_session
+    ,f."date" AS date_conversion
+    ,CASE WHEN f.mops_source_name = 'fact.media_alpha_click_revenue' THEN f.revenue ELSE 0 END AS revenue
+    ,COALESCE((d.document ->> 'rev')::NUMERIC, 0) AS call_revenue
+    ,CASE
+       WHEN f.mops_source_name = 'fact.media_alpha_click_revenue' AND f.revenue > 0 THEN TRUE
+       WHEN COALESCE((d.document ->> 'rev')::NUMERIC, 0) > 0 THEN TRUE
+       ELSE FALSE
+    END AS conversion
+    ,f.mops_source_name
+  FROM fact.media_cube AS f
+
+  INNER JOIN web.sessions AS w
+  ON f.id_session = w.id_session
+
+  INNER JOIN fact.everflow_clicks AS c
+  ON c.id_transaction = w.url_parameters ->> 'etid'
+ 
+  LEFT JOIN doc.media_alpha_call_events AS d
+  ON f.mops_source_name = 'fact.ma_calls' 
+  AND f.mops_source_id = d.id_call
+  AND d.event = 'transfer_end'
+
+  WHERE f."date" >= '2025-02-03'
+  AND f."date" < '2025-02-04'
+  AND c.affiliate_name = 'Madrivo';
+
+
+SELECT DISTINCT ON (id_transaction)
+  id_transaction
+  ,COALESCE(call_revenue, revenue)
+FROM universe
+WHERE conversion = TRUE
+ORDER BY id_transaction, date_conversion ASC;
