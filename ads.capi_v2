@@ -1,0 +1,155 @@
+-- Both have same gclid and same data
+SELECT ads.capi_v2('call', '5f050fd79bb16366fbcb6cf691260eac');      -- call, Google
+SELECT ads.capi_v2('click', '35a1e8ff-253f-4113-b64b-b6f7506db337'); -- gclid, Google
+
+
+-- # Get all sessions related to the conversion (call id)
+WITH _sessions AS (
+  SELECT
+  	sall.id_session
+  	,sall.device_properties
+  	,sall.website
+  	,sall.date_start AS date_session
+  	,c.call_id AS id_conversion
+  	,c.date_connect AS date_conversion
+  	,ROW_NUMBER() OVER(PARTITION BY c.call_id ORDER BY sall.date_start DESC) AS session_number_desc
+  FROM fact.ma_calls c
+
+  INNER JOIN web.sessions s     -- This join is to check if the actual session exists
+  ON c.sub_3 = s.id_session     -- This can result in more than 1 row, 1 session generate multiple calls or just 1
+
+  INNER JOIN web.sessions sall                            -- We get all sessions from the id_session
+  ON s.id_anonymous_cluster = sall.id_anonymous_cluster   -- Many sessions can have the same id_anonymous_cluster 
+
+  WHERE c.call_id = '5f050fd79bb16366fbcb6cf691260eac'
+  AND (
+  	c.date_connect >= sall.date_start -- The call date has to be greater or equal than the session date
+  	OR s.id_session = sall.id_session -- Or the sessions should be the same in both sides
+  )
+
+	UNION ALL
+
+-- # Get all sessions related to the conversion (id_session), what if there is no id call? Then we use click_revenue
+	SELECT
+		sall.id_session
+		,sall.device_properties
+		,sall.website
+		,sall.date_start AS date_session
+		,s.id_session AS id_conversion
+		,s.date_start AS date_conversion
+		,ROW_NUMBER() OVER(PARTITION BY s.id_session ORDER BY sall.date_start DESC) AS session_number_desc
+	FROM web.sessions s
+	INNER JOIN web.sessions sall
+	ON s.id_anonymous_cluster = sall.id_anonymous_cluster
+	WHERE  s.id_session = '35a1e8ff-253f-4113-b64b-b6f7506db337'
+	AND (
+		s.date_start >= sall.date_start
+		OR s.id_session = sall.id_session
+	)
+)
+-- # Get all clicks related to the sessions
+, parsing AS (
+  SELECT
+  	s.id_session
+  	,c.id_uuid AS id_click
+  	,c.type
+  	,cs.clid
+  	,s.website
+  	,s.date_session
+  	,s.date_conversion
+  	,s.id_conversion
+  	,s.device_properties ->> 'gaClientId' AS gaclientid
+  	,s.device_properties ->> 'gaSessionId' AS gasessionid
+  	,s.device_properties ->> 'ip' AS ip
+  	,s.device_properties ->> 'ua' AS ua
+  	,s.session_number_desc
+  FROM _sessions s
+  
+  INNER JOIN web.click_sessions cs -- Could generate duplicates because 1 id_session can have more row by type and clid
+  ON s.id_session = cs.id_session
+  
+  INNER JOIN web.clicks c          -- I consider this join is not necessary, web.click_sessions has the same data
+  ON cs.id_click = c.id_uuid
+  
+  WHERE c.type NOT IN ('gaClientId','gaSessionId')
+  ORDER BY 1 --todo: might remove later
+)
+	, _payloads AS (
+		WITH _google_clicks AS (
+			SELECT DISTINCT ON (id_conversion)
+				JSONB_BUILD_OBJECT(
+					type, clid,
+					'website', website,
+					'timestamp', date_session
+				) AS payload
+			FROM parsing
+			WHERE type IN ('gclid','gbraid','wbraid')
+			ORDER BY id_conversion, date_session DESC
+		)
+		, _gaclientid AS (
+			SELECT DISTINCT ON (gaclientid)
+				JSONB_BUILD_OBJECT(
+					'gaClientId', gaclientid,
+					'gaSessionId', gasessionid,
+					'website', website,
+					'timestamp', date_session
+				) AS payload
+			FROM parsing
+			WHERE gaclientid IS NOT NULL
+			ORDER BY gaclientid, date_session DESC
+		)
+		, _facebook AS (
+			SELECT DISTINCT ON (clid)
+				JSONB_BUILD_OBJECT(
+					type, CONCAT('fb.1.', EXTRACT(EPOCH FROM date_session), '.', clid),
+					'website', website,
+					'timestamp', date_session,
+					'id_sesison', id_session,
+					'ip', ip,
+					'ua', ua,
+					'click_uuid', id_click,
+					'last_click', ROW_NUMBER() OVER(PARTITION BY type ORDER BY date_session DESC) = 1
+				) AS payload
+			FROM parsing
+			WHERE type = 'fbclid'
+			ORDER BY clid, date_session DESC
+		)
+		, _everflow AS (
+			SELECT DISTINCT ON (type)
+				JSONB_BUILD_OBJECT(
+					type, clid,
+					'website', website,
+					'timestamp', date_session,
+					'click_uuid', id_click,
+					'last_click', ROW_NUMBER() OVER(PARTITION BY type ORDER BY date_session DESC) = 1
+				) AS payload
+			FROM parsing
+			WHERE type = 'etid'
+			AND session_number_desc = 1
+		)
+		, _all_clicks AS (
+			SELECT DISTINCT ON (id_click)
+				JSONB_BUILD_OBJECT(
+					type, clid,
+					'website', website,
+					'timestamp', date_session,
+					'click_uuid', id_click,
+					'last_click', ROW_NUMBER() OVER(PARTITION BY type ORDER BY date_session DESC) = 1
+				) AS payload
+			FROM parsing
+			WHERE type iN ('ttclid', 'tblci', 'clkid')
+		)
+		SELECT payload FROM _google_clicks
+		UNION ALL
+		SELECT payload FROM _facebook
+		UNION ALL
+		SELECT payload FROM _gaclientid
+		UNION ALL
+		SELECT payload FROM _everflow
+		UNION ALL
+		SELECT payload FROM _all_clicks
+	)
+	SELECT JSONB_AGG(payload)
+	FROM _payloads;
+
+	RETURN COALESCE(_response, '[]');
