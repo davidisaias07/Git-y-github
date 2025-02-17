@@ -1,0 +1,221 @@
+
+SELECT
+	JSONB_AGG(
+	JSONB_BUILD_OBJECT(
+	    'code', r.state
+	    ,'name', r.state_name
+	    ,'medicaid', COALESCE(r.medicaid_program||CASE WHEN r.medicaid_program ILIKE '%Medicaid%' THEN '' ELSE ' (Medicaid)' END,'Medicaid')
+	    ,'minOtc', r.minOtc
+	    ,'maxOtc', r.maxOtc
+	    ,'minGiveback', r.minGiveback
+	    ,'maxGiveback', r.maxGiveback
+		,'minOtcLtd', coalesce(r.minOtcLtd,r.minOtc)
+		,'maxFipsMinOtcLtdFips',r.maxFipsMinOtcLtdFips
+		,'maxFipsMinOtcLtdAmount',r.maxFipsMinOtcLtdAmount
+		,'maxFipsMinOtcLtdCountyName',r.maxFipsMinOtcLtdCountyName
+		,'minGivebackLtd', coalesce(r.minGivebackLtd,r.minGiveback)
+		,'maxFipsMinGivebackLtdFips',r.maxFipsMinGivebackLtdFips
+		,'maxFipsMinGivebackLtdAmount', r.maxFipsMinGivebackLtdAmount
+		,'maxFipsMinGivebackLtdCountyName',r.maxFipsMinGivebackLtdCountyName
+	    ,'top5Otc', r.top5Otc
+    )) AS json_data
+FROM (
+	WITH otc_and_giveback_amounts_by_state AS (
+	    SELECT
+	    	p.id_plan
+	        ,s.state
+	        ,plan.get_otc_allowance_annual(o.coverage ->> 'pbp_b13b_otc_maxplan_per', (o.coverage ->> 'pbp_b13b_maxplan_amt')::NUMERIC) AS otc_amount
+			,plan.get_otc_allowance_annual(o2.coverage ->> 'pbp_b13b_otc_maxplan_per', (o2.coverage ->> 'pbp_b13b_maxplan_amt')::NUMERIC) AS otc_ltd_amount
+			,ROUND((g.coverage ->> 'pbp_d_mco_pay_reduct_amt')::NUMERIC,3) AS giveback_amount
+			,ROUND((g2.coverage ->> 'pbp_d_mco_pay_reduct_amt')::NUMERIC,3) AS giveback_ltd_amount
+	    FROM plan.plans AS p
+
+	    LEFT JOIN plan.plan_benefits AS o
+	    ON p.id_plan = o.id_plan
+	    AND o.benefit = 'otc_summary'
+
+		LEFT JOIN plan.plan_benefits AS o2
+		ON p.id_plan = o2.id_plan
+		AND o2.benefit = 'otc_summary'
+		AND p.carrier IN (SELECT DISTINCT carrier FROM plan.carriers WHERE carrier_group IN ('United','Humana'))
+		AND p.plan_type = 'D-SNP'
+        AND p.employer_plan = 0
+
+	    LEFT JOIN plan.plan_benefits AS g
+	    ON p.id_plan = g.id_plan
+	    AND g.benefit = 'giveback_summary'
+
+		LEFT JOIN plan.plan_benefits AS g2
+		ON p.id_plan = g2.id_plan
+		AND g2.benefit = 'giveback_summary'
+		AND p.carrier IN (SELECT DISTINCT carrier FROM plan.carriers WHERE carrier_group IN ('United','Humana'))
+		AND p.plan_type = 'STD'
+		AND p.employer_plan = 0
+
+	    INNER JOIN plan.plan_states AS s
+	    ON p.id_plan = s.id_plan
+    )
+
+	--  Getting the otc ltd amount by fips
+	,otc_ltd_amount_by_fips AS (
+		SELECT
+			pa.fips
+			,f.state
+			,p.id_plan
+			,plan.get_otc_allowance_annual(b.coverage ->> 'pbp_b13b_otc_maxplan_per', (b.coverage ->> 'pbp_b13b_maxplan_amt')::NUMERIC) AS otc_amount_ltd_emp_0
+		FROM plan.plans AS p
+
+		INNER JOIN plan.plan_areas AS pa
+		ON p.id_plan = pa.id_plan
+
+		INNER JOIN plan.plan_benefits AS b
+		ON p.id_plan = b.id_plan
+		AND b.benefit = 'otc_summary'
+
+		INNER JOIN plan.plan_states AS f
+		ON p.id_plan = f.id_plan
+
+		WHERE p.plan_type = 'D-SNP'
+		AND p.employer_plan = 0
+		AND p.carrier IN (SELECT DISTINCT carrier FROM plan.carriers WHERE carrier_group IN ('United','Humana'))
+	)
+
+	-- Min otc ltd amount by fips
+	,min_otc_ltd_amount_by_state_and_fips AS (
+		SELECT
+			fips
+			,state
+			,MIN(otc_amount_ltd_emp_0) AS maxFipsMinOtcLtdAmount
+		FROM otc_ltd_amount_by_fips
+		GROUP BY 1, 2
+	)
+
+	-- Highest min otc ltd amount by fips
+	,highest_min_otc_ltd_amount_by_fips AS (
+		SELECT
+			q.fips
+			,q.state
+			,q.maxFipsMinOtcLtdAmount
+		FROM (
+			SELECT
+				fips
+				,state
+				,maxFipsMinOtcLtdAmount
+				,ROW_NUMBER() OVER(PARTITION BY state ORDER BY maxFipsMinOtcLtdAmount DESC NULLS LAST) AS rn
+			FROM min_otc_ltd_amount_by_state_and_fips
+		) AS q
+		WHERE q.rn = 1
+	)
+
+	--  Getting the giveback ltd amount by fips
+	,giveback_ltd_amount_by_fips AS (
+		SELECT
+			pa.fips
+			,f.state
+			,p.id_plan
+			,ROUND((g.coverage ->> 'pbp_d_mco_pay_reduct_amt')::NUMERIC,3) AS giveback_amount_ltd_emp_0
+		FROM plan.plans AS p
+
+		INNER JOIN plan.plan_areas AS pa
+		ON p.id_plan = pa.id_plan
+
+		INNER JOIN plan.plan_benefits AS g
+		ON p.id_plan = g.id_plan
+		AND g.benefit = 'giveback_summary'
+
+		INNER JOIN plan.plan_states AS f
+		ON p.id_plan = f.id_plan
+
+		WHERE p.plan_type = 'STD'
+		AND p.employer_plan = 0
+		AND p.carrier IN (SELECT DISTINCT carrier FROM plan.carriers WHERE carrier_group IN ('United','Humana'))
+	)
+
+	-- Min giveback ltd amount by fips
+	,min_giveback_ltd_amount_by_state_and_fips AS (
+		SELECT
+			fips
+			,state
+			,MIN(giveback_amount_ltd_emp_0) AS maxFipsMinGivebackLtdAmount
+		FROM giveback_ltd_amount_by_fips
+		GROUP BY 1,2
+	)
+
+	-- Highest min giveback ltd amount by fips
+	,highest_min_giveback_ltd_amount_by_fips AS (
+		SELECT
+			q.fips
+			,q.state
+			,q.maxFipsMinGivebackLtdAmount
+		FROM (
+			SELECT
+				fips
+				,state
+				,maxFipsMinGivebackLtdAmount
+				,ROW_NUMBER() OVER(PARTITION BY state ORDER BY maxFipsMinGivebackLtdAmount DESC NULLS LAST) AS rn
+			FROM min_giveback_ltd_amount_by_state_and_fips
+		) AS q
+		WHERE q.rn = 1
+	)
+
+	-- Distinct fips with county
+	,county_by_fips AS (
+		SELECT
+			DISTINCT fips
+			,county
+		FROM plan.areas
+	)
+
+	-- To get the 5th otc amount
+   ,ranking_state AS (
+        SELECT
+            p.state
+            ,m.state AS state_name
+            ,m.medicaid_program
+            ,p.giveback_amount
+            ,p.giveback_ltd_amount
+            ,p.otc_amount
+			,p.otc_ltd_amount
+            ,ROW_NUMBER() OVER(PARTITION BY p.state ORDER BY p.otc_amount DESC NULLS LAST) AS otc_ranking
+        FROM otc_and_giveback_amounts_by_state AS p
+        LEFT JOIN dim.state_medicaid AS m
+        ON p.state = m.short_state
+    )
+    SELECT
+        r.state
+        ,r.state_name
+        ,r.medicaid_program
+        ,MIN(r.otc_amount) AS minOtc
+        ,MAX(r.otc_amount) AS maxOtc
+        ,MIN(r.giveback_amount) AS minGiveback
+        ,MAX(r.giveback_amount) AS maxGiveback
+        ,MIN(r.otc_ltd_amount) AS minOtcLtd
+		,MAX(ho.fips) AS maxFipsMinOtcLtdFips
+		,MAX(ho.maxFipsMinOtcLtdAmount) AS maxFipsMinOtcLtdAmount
+		,MAX(cf.county) AS maxFipsMinOtcLtdCountyName
+        ,MIN(r.giveback_ltd_amount) AS minGivebackLtd
+		,MAX(hg.fips) AS maxFipsMinGivebackLtdFips
+		,MAX(hg.maxFipsMinGivebackLtdAmount) AS maxFipsMinGivebackLtdAmount
+		,MAX(cf2.county) AS maxFipsMinGivebackLtdCountyName
+        ,MAX(r1.otc_amount) AS top5Otc
+    FROM ranking_state AS r
+
+    LEFT JOIN ranking_state AS r1
+    ON r.state = r1.state
+    AND r1.otc_ranking = 5
+
+	LEFT JOIN highest_min_otc_ltd_amount_by_fips AS ho
+	ON r.state = ho.state
+
+	LEFT JOIN county_by_fips AS cf
+	ON ho.fips = cf.fips
+
+	LEFT JOIN highest_min_giveback_ltd_amount_by_fips AS hg
+	ON r.state = hg.state
+
+	LEFT JOIN county_by_fips AS cf2
+	ON hg.fips = cf2.fips
+
+    GROUP BY 1,2,3
+    ORDER BY 1
+) AS r;
