@@ -151,5 +151,3 @@ WITH _sessions AS (
 	)
 	SELECT JSONB_AGG(payload)
 	FROM _payloads;
-
-	RETURN COALESCE(_response, '[]');
