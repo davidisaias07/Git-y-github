@@ -1,7 +1,6 @@
--- Both have same gclid and same data
-SELECT ads.capi_v2('call', '5f050fd79bb16366fbcb6cf691260eac');      -- call, Google
-SELECT ads.capi_v2('click', '35a1e8ff-253f-4113-b64b-b6f7506db337'); -- gclid, Google
-
+-- SELECT ads.capi_v2('click', 'dcaff00f-9574-4629-9ce6-b4addd7382d3');
+-- SELECT ads.capi_v2('call', '9f7d66ca2e038d593905142457273d27');
+-- SELECT ads.capi_v2('call', 'f60a4db02f039178203b1d628088cfb3');
 
 -- # Get all sessions related to the conversion (call id)
 WITH _sessions AS (
@@ -48,7 +47,7 @@ WITH _sessions AS (
 	)
 )
 -- # Get all clicks related to the sessions
-, parsing AS (
+, _session_clicks AS (
   SELECT
   	s.id_session
   	,c.id_uuid AS id_click
@@ -74,80 +73,81 @@ WITH _sessions AS (
   WHERE c.type NOT IN ('gaClientId','gaSessionId')
   ORDER BY 1 --todo: might remove later
 )
-	, _payloads AS (
-		WITH _google_clicks AS (
-			SELECT DISTINCT ON (id_conversion)
-				JSONB_BUILD_OBJECT(
-					type, clid,
-					'website', website,
-					'timestamp', date_session
-				) AS payload
-			FROM parsing
-			WHERE type IN ('gclid','gbraid','wbraid')
-			ORDER BY id_conversion, date_session DESC
+, payloads AS (
+  WITH _google_clicks AS (
+	  SELECT DISTINCT ON (id_conversion)
+		  JSONB_BUILD_OBJECT(
+  			type, clid
+  			,'website', website
+  			,'timestamp', date_session
+			) AS payload
+		FROM _session_clicks
+		WHERE type IN ('gclid','gbraid','wbraid')
+		ORDER BY id_conversion, date_session DESC
 		)
-		, _gaclientid AS (
-			SELECT DISTINCT ON (gaclientid)
-				JSONB_BUILD_OBJECT(
-					'gaClientId', gaclientid,
-					'gaSessionId', gasessionid,
-					'website', website,
-					'timestamp', date_session
-				) AS payload
-			FROM parsing
-			WHERE gaclientid IS NOT NULL
-			ORDER BY gaclientid, date_session DESC
-		)
-		, _facebook AS (
-			SELECT DISTINCT ON (clid)
-				JSONB_BUILD_OBJECT(
-					type, CONCAT('fb.1.', EXTRACT(EPOCH FROM date_session), '.', clid),
-					'website', website,
-					'timestamp', date_session,
-					'id_sesison', id_session,
-					'ip', ip,
-					'ua', ua,
-					'click_uuid', id_click,
-					'last_click', ROW_NUMBER() OVER(PARTITION BY type ORDER BY date_session DESC) = 1
-				) AS payload
-			FROM parsing
-			WHERE type = 'fbclid'
-			ORDER BY clid, date_session DESC
-		)
-		, _everflow AS (
-			SELECT DISTINCT ON (type)
-				JSONB_BUILD_OBJECT(
-					type, clid,
-					'website', website,
-					'timestamp', date_session,
-					'click_uuid', id_click,
-					'last_click', ROW_NUMBER() OVER(PARTITION BY type ORDER BY date_session DESC) = 1
-				) AS payload
-			FROM parsing
-			WHERE type = 'etid'
-			AND session_number_desc = 1
-		)
-		, _all_clicks AS (
-			SELECT DISTINCT ON (id_click)
-				JSONB_BUILD_OBJECT(
-					type, clid,
-					'website', website,
-					'timestamp', date_session,
-					'click_uuid', id_click,
-					'last_click', ROW_NUMBER() OVER(PARTITION BY type ORDER BY date_session DESC) = 1
-				) AS payload
-			FROM parsing
-			WHERE type iN ('ttclid', 'tblci', 'clkid')
-		)
-		SELECT payload FROM _google_clicks
-		UNION ALL
-		SELECT payload FROM _facebook
-		UNION ALL
-		SELECT payload FROM _gaclientid
-		UNION ALL
-		SELECT payload FROM _everflow
-		UNION ALL
-		SELECT payload FROM _all_clicks
-	)
-	SELECT JSONB_AGG(payload)
-	FROM _payloads;
+  , everflow AS (
+    SELECT DISTINCT ON (type)
+      JSONB_BUILD_OBJECT(
+        'etid', clid 
+        ,'website', website
+        ,'date_session', date_session    
+        ,'last_click', ROW_NUMBER() OVER(PARTITION BY type ORDER BY date_session DESC) = 1
+        ,'id_session', id_session
+      )payload
+    FROM _session_clicks
+    WHERE type = 'etid'
+    AND session_number_desc = 1
+  )
+  , _gaclientid AS (
+    SELECT DISTINCT ON (gaClientId)
+      JSONB_BUILD_OBJECT(
+        'gaClientId', gaClientId
+        ,'gaSessionId', gasessionid 
+        ,'website', website
+        ,'date_session', date_session    
+        ,'id_session', id_session
+      )payload
+    FROM _session_clicks
+    WHERE gaClientId IS NOT NULL
+  -- We have duplicates here because we are not using the rn = 1
+    ORDER BY gaClientId, date_session DESC
+  )
+  , _facebook AS (
+  	SELECT DISTINCT ON (clid)
+  		JSONB_BUILD_OBJECT(
+  			type, CONCAT('fb.1.', EXTRACT(EPOCH FROM date_session), '.', clid)
+  			,'website', website
+  			,'timestamp', date_session
+  			,'id_sesison', id_session
+  			,'click_uuid', id_click
+  			,'last_click', ROW_NUMBER() OVER(PARTITION BY type ORDER BY date_session DESC) = 1
+  		) AS payload
+  	FROM _session_clicks
+  	WHERE type = 'fbclid'
+  	ORDER BY clid, date_session DESC
+  )
+  , _all_clicks AS (
+  	SELECT DISTINCT ON (id_click)
+  		JSONB_BUILD_OBJECT(
+  			type, clid
+  			,'website', website
+  			,'timestamp', date_session
+  			,'click_uuid', id_click
+  			,'last_click', ROW_NUMBER() OVER(PARTITION BY type ORDER BY date_session DESC) = 1
+  		) AS payload
+  	FROM _session_clicks
+  	WHERE type iN ('ttclid', 'tblci', 'clkid')
+  )
+  SELECT * FROM _google_clicks 
+  UNION ALL
+  SELECT * FROM everflow 
+  UNION ALL 
+  SELECT * FROM _gaclientid 
+  UNION ALL 
+  SELECT * FROM _facebook
+  UNION ALL
+  SELECT * FROM _all_clicks
+)
+SELECT
+  COALESCE(JSONB_AGG(payload), '[]')
+FROM payloads;
